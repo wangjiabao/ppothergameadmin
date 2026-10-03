@@ -7,11 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	pb "game/api/app/v1"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
-	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
-	"github.com/go-kratos/kratos/v2/errors"
-	"github.com/go-kratos/kratos/v2/log"
 	"math"
 	"math/big"
 	rand2 "math/rand"
@@ -20,6 +15,12 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/go-kratos/kratos/v2/errors"
+	"github.com/go-kratos/kratos/v2/log"
 )
 
 type Pagination struct {
@@ -9065,7 +9066,7 @@ func (ac *AppUsecase) DepositNewTwo(ctx context.Context, eth *EthRecord) error {
 		if "rate_r_8" == vConfig.KeyName {
 			r8, _ = strconv.ParseFloat(vConfig.Value, 10)
 		}
-		if "rate_r_8" == vConfig.KeyName {
+		if "rate_r_9" == vConfig.KeyName {
 			r9, _ = strconv.ParseFloat(vConfig.Value, 10)
 		}
 		if "rate_r_10" == vConfig.KeyName {
