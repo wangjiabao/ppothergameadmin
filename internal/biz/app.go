@@ -8832,8 +8832,218 @@ func (ac *AppUsecase) DepositNew(ctx context.Context, eth *EthRecord) error {
 func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountFloat float64) error {
 	// 推荐人
 	var (
-		err error
+		configs      []*Config
+		user         *User
+		oneRate      float64
+		priceOpen    float64
+		priceOpenUse uint64
+		err          error
+		r1           float64
+		r2           float64
+		r3           float64
+		r4           float64
+		r5           float64
+		r6           float64
+		r7           float64
+		r8           float64
+		r9           float64
+		r10          float64
+		v1           float64
+		v2           float64
+		v3           float64
+		v4           float64
+		v5           float64
+		v6           float64
+		v7           float64
+		v8           float64
+		v9           float64
+		v10          float64
+		//g1           float64
+		//g2           float64
+		//g3           float64
+		//g4           float64
+		//g5           float64
+		//g6           float64
+		//g7           float64
+		//g8           float64
+		//g9           float64
+		//g10          float64
+		stakePrice   float64
+		stakePriceOn uint64
 	)
+
+	// 配置
+	configs, err = ac.userRepo.GetConfigByKeys(ctx,
+		"one_rate_new",
+		"stake_price",
+		"stake_price_on",
+		"rate_r_1",
+		"rate_r_2",
+		"rate_r_3",
+		"rate_r_4",
+		"rate_r_5",
+		"rate_r_6",
+		"rate_r_7",
+		"rate_r_8",
+		"rate_r_9",
+		"rate_r_10",
+		"v_1",
+		"v_2",
+		"v_3",
+		"v_4",
+		"v_5",
+		"v_6",
+		"v_7",
+		"v_8",
+		"v_9",
+		"v_10",
+		"stake_price",
+		"stake_price_on",
+	)
+	if nil != err || nil == configs {
+		return nil
+	}
+
+	for _, vConfig := range configs {
+		if "one_rate_new" == vConfig.KeyName {
+			oneRate, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "stake_price" == vConfig.KeyName {
+			priceOpen, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+
+		if "stake_price_on" == vConfig.KeyName {
+			priceOpenUse, _ = strconv.ParseUint(vConfig.Value, 10, 64)
+		}
+
+		if "rate_r_1" == vConfig.KeyName {
+			r1, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_2" == vConfig.KeyName {
+			r2, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_3" == vConfig.KeyName {
+			r3, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_4" == vConfig.KeyName {
+			r4, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_5" == vConfig.KeyName {
+			r5, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_6" == vConfig.KeyName {
+			r6, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_7" == vConfig.KeyName {
+			r7, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_8" == vConfig.KeyName {
+			r8, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_9" == vConfig.KeyName {
+			r9, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "rate_r_10" == vConfig.KeyName {
+			r10, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_1" == vConfig.KeyName {
+			v1, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_2" == vConfig.KeyName {
+			v2, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_3" == vConfig.KeyName {
+			v3, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_4" == vConfig.KeyName {
+			v4, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_5" == vConfig.KeyName {
+			v5, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_6" == vConfig.KeyName {
+			v6, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_7" == vConfig.KeyName {
+			v7, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_8" == vConfig.KeyName {
+			v8, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_9" == vConfig.KeyName {
+			v9, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "v_10" == vConfig.KeyName {
+			v10, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "stake_price" == vConfig.KeyName {
+			stakePrice, _ = strconv.ParseFloat(vConfig.Value, 10)
+		}
+		if "stake_price_on" == vConfig.KeyName {
+			stakePriceOn, _ = strconv.ParseUint(vConfig.Value, 10, 64)
+		}
+	}
+
+	user, err = ac.userRepo.GetUserByAddress(ctx, eth.Address) // 查询用户
+	if nil != err || nil == user {
+		return err
+	}
+
+	//var (
+	//	tmp0 float64
+	//	tmp1 float64
+	//)
+	//tmp0, tmp1, err = GetReservers()
+	//if nil != err || 1 >= tmp0 || 1 >= tmp1 {
+	//	return err
+	//}
+
+	var (
+		newIspayPrice float64
+	)
+	if 1 == stakePriceOn {
+		newIspayPrice = stakePrice
+		if 0.0000001 > newIspayPrice {
+			fmt.Println(err, newIspayPrice, "err ispay price dd")
+			return err
+		}
+	} else {
+		newIspayPrice, err = GetIspayPrice()
+		if nil != err || 0.0000001 > newIspayPrice {
+			fmt.Println(err, newIspayPrice, "err ispay price")
+			return err
+		}
+	}
+
+	ethAmountUsdt := amountFloat * newIspayPrice
+
+	// 推荐
+	var (
+		userRecommend *UserRecommend
+	)
+	tmpRecommendUserIds := make([]string, 0)
+	userRecommend, err = ac.userRepo.GetUserRecommendByUserId(ctx, eth.UserId)
+	if nil == userRecommend || nil != err {
+		return err
+	}
+	if "" != userRecommend.RecommendCode {
+		tmpRecommendUserIds = strings.Split(userRecommend.RecommendCode, "D")
+	}
+
+	reward := ethAmountUsdt * oneRate
+	var (
+		users    []*User
+		usersMap map[uint64]*User
+	)
+	users, err = ac.userRepo.GetAllUsers(ctx)
+	if nil == users {
+		return err
+	}
+
+	usersMap = make(map[uint64]*User, 0)
+	for _, vUsers := range users {
+		usersMap[vUsers.ID] = vUsers
+	}
 
 	if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
 		err = ac.userRepo.AddIspay(ctx, eth.Address, amountFloat)
@@ -8850,6 +9060,193 @@ func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountF
 	}); nil != err {
 		fmt.Println(err, "deposit ispay err", eth)
 		return err
+	}
+
+	totalTmp := len(tmpRecommendUserIds) - 1
+	if reward > 0 && 0 == user.RecommendOne {
+		tmpI := 0
+		for i := len(tmpRecommendUserIds) - 1; i >= 0; i-- {
+			if 1 <= tmpI {
+				break
+			}
+			tmpI++
+
+			tmpUserId, _ := strconv.ParseUint(tmpRecommendUserIds[i], 10, 64) // 最后一位是直推人
+			if 0 >= tmpUserId {
+				continue
+			}
+
+			//if lowRewardU > usersMap[tmpUserId].Giw/uPrice {
+			//	continue
+			//}
+
+			var (
+				ispayL float64
+			)
+			reward = reward / 2
+			if 1 == priceOpenUse {
+				ispayL = reward / priceOpen
+			} else {
+				ispayL = reward / newIspayPrice
+			}
+
+			if 0 < reward {
+				if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
+					// 奖励
+					err = ac.userRepo.NewRecommendReward(ctx, tmpUserId, user.ID, reward, ispayL)
+					if nil != err {
+						return err
+					}
+
+					err = ac.userRepo.CreateNotice(
+						ctx,
+						tmpUserId,
+						"您收获了"+fmt.Sprintf("%.2f", reward)+"USDT 和"+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
+						"You've harvest "+fmt.Sprintf("%.2f", reward)+" USDT AND "+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
+					)
+					if nil != err {
+						return err
+					}
+
+					return nil
+				}); nil != err {
+					fmt.Println(err, "deposit err", eth)
+					return err
+				}
+			}
+
+			break
+		}
+	}
+
+	tmpI := 0
+	for i := totalTmp; i >= 0; i-- {
+		tmpI++
+		tmpUserId, _ := strconv.ParseInt(tmpRecommendUserIds[i], 10, 64) // 最后一位是直推人
+		if 0 >= tmpUserId {
+			continue
+		}
+
+		if _, ok := usersMap[uint64(tmpUserId)]; !ok {
+			fmt.Println("buy遍历，信息缺失,user：", err, tmpUserId)
+			continue
+		}
+
+		addTotal := false
+		if 1 == tmpI {
+			addTotal = true
+		}
+		// 增加业绩
+		if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
+			err = ac.userRepo.UpdateUserMyTotalAmountAdd(ctx, uint64(tmpUserId), eth.UserId, ethAmountUsdt, addTotal)
+			if err != nil {
+				return err
+			}
+
+			return nil
+		}); nil != err {
+			fmt.Println("遍历业绩：", err, tmpUserId, user)
+			continue
+		}
+	}
+
+	tmpCurrentLevel := 0
+	var tmpCurrentRate float64
+	for i := totalTmp; i >= 0; i-- {
+		tmpUserId, _ := strconv.ParseInt(tmpRecommendUserIds[i], 10, 64) // 最后一位是直推人
+		if 0 >= tmpUserId {
+			continue
+		}
+
+		if _, ok := usersMap[uint64(tmpUserId)]; !ok {
+			fmt.Println("buy遍历，信息缺失,user：", err, tmpUserId)
+			continue
+		}
+
+		if 1 == usersMap[uint64(tmpUserId)].LockReward {
+			continue
+		}
+
+		tmpVip := usersMap[uint64(tmpUserId)].Vip
+		// 直推
+		tmpRecommendUser := usersMap[uint64(tmpUserId)]
+
+		tmpLevel := 0
+		var tmpRate float64
+		if v10 <= tmpRecommendUser.MyTotalAmountNew || 10 == tmpVip {
+			tmpLevel = 10
+			tmpRate = r10
+		} else if v9 <= tmpRecommendUser.MyTotalAmountNew || 9 == tmpVip {
+			tmpLevel = 9
+			tmpRate = r9
+		} else if v8 <= tmpRecommendUser.MyTotalAmountNew || 8 == tmpVip {
+			tmpLevel = 8
+			tmpRate = r8
+		} else if v7 <= tmpRecommendUser.MyTotalAmountNew || 7 == tmpVip {
+			tmpLevel = 7
+			tmpRate = r7
+		} else if v6 <= tmpRecommendUser.MyTotalAmountNew || 6 == tmpVip {
+			tmpLevel = 6
+			tmpRate = r6
+		} else if v5 <= tmpRecommendUser.MyTotalAmountNew || 5 == tmpVip {
+			tmpLevel = 5
+			tmpRate = r5
+		} else if v4 <= tmpRecommendUser.MyTotalAmountNew || 4 == tmpVip {
+			tmpLevel = 4
+			tmpRate = r4
+		} else if v3 <= tmpRecommendUser.MyTotalAmountNew || 3 == tmpVip {
+			tmpLevel = 3
+			tmpRate = r3
+		} else if v2 <= tmpRecommendUser.MyTotalAmountNew || 2 == tmpVip {
+			tmpLevel = 2
+			tmpRate = r2
+		} else if v1 <= tmpRecommendUser.MyTotalAmountNew || 1 == tmpVip {
+			tmpLevel = 1
+			tmpRate = r1
+		}
+
+		var tmpReward float64
+		if tmpCurrentLevel < tmpLevel {
+			tmpReward = ethAmountUsdt * (tmpRate - tmpCurrentRate)
+			tmpCurrentRate = tmpRate
+			tmpCurrentLevel = tmpLevel
+		} else {
+			continue
+		}
+
+		if 0.000001 < tmpReward {
+			var (
+				ispayL float64
+			)
+			tmpReward = tmpReward / 2
+			if 1 == priceOpenUse {
+				ispayL = tmpReward / priceOpen
+			} else {
+				ispayL = tmpReward / newIspayPrice
+			}
+
+			// 入金
+			if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
+				err = ac.userRepo.NewRecommendRewardNew(ctx, uint64(tmpUserId), eth.UserId, uint64(tmpLevel), tmpReward, ispayL)
+				if err != nil {
+					fmt.Println("错误分红直推：", err)
+					return err
+				}
+
+				err = ac.userRepo.CreateNotice(
+					ctx,
+					uint64(tmpUserId),
+					"您在下级充值获得了"+fmt.Sprintf("%.5f", tmpReward)+"USDT 和 "+fmt.Sprintf("%.5f", ispayL)+"ISPAY",
+					"You've harvest "+fmt.Sprintf("%.5f", tmpReward)+" USDT and "+fmt.Sprintf("%.5f", ispayL)+"ISPAY from team deposit",
+				)
+				if nil != err {
+					return err
+				}
+				return nil
+			}); nil != err {
+				fmt.Println("err reward recommend", err, tmpReward, user, tmpRecommendUser)
+			}
+		}
 	}
 
 	return nil
