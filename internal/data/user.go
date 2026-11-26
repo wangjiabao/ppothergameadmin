@@ -8,6 +8,7 @@ import (
 	"github.com/go-kratos/kratos/v2/log"
 	"gorm.io/gorm"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,7 @@ type User struct {
 	Amount           float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
 	AmountGet        float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
 	AmountUsdt       float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
+	AmountUsdtSwap   float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
 	AmountUsdtTotal  float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
 	MyTotalAmount    float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
 	MyTotalAmountNew float64   `gorm:"type:decimal(65,20);default:0.00000000000000000000;"`
@@ -1061,11 +1063,24 @@ func (u *UserRepo) GetRecordPageThree(ctx context.Context, address string, b *bi
 
 // GetRecordPage .
 func (u *UserRepo) GetRecordPage(ctx context.Context, address string, b *biz.Pagination) ([]*biz.EthRecord, error) {
-	var eth []*EthRecord
+	type ethRecordPage struct {
+		ID          uint64
+		UserId      uint64
+		Amount      uint64
+		Last        uint64
+		Address     string
+		Coin        string
+		AmountFloat float64 `gorm:"column:amount_float"`
+		AmountText  string  `gorm:"column:amount_text"`
+		CreatedAt   time.Time
+		UpdatedAt   time.Time
+	}
+	var eth []*ethRecordPage
 
 	res := make([]*biz.EthRecord, 0)
 
 	instance := u.data.DB(ctx).Table("eth_record")
+	instance = instance.Select("id, user_id, amount, last, address, coin, amount_float, CAST(amount_float AS CHAR) AS amount_text, created_at, updated_at")
 
 	if 0 < len(address) {
 		instance = instance.Where("address=?", address)
@@ -1081,13 +1096,15 @@ func (u *UserRepo) GetRecordPage(ctx context.Context, address string, b *biz.Pag
 
 	for _, v := range eth {
 		res = append(res, &biz.EthRecord{
-			ID:        v.ID,
-			UserId:    v.UserId,
-			Amount:    v.Amount,
-			Last:      v.Last,
-			Address:   v.Address,
-			CreatedAt: v.CreatedAt,
-			Coin:      v.Coin,
+			ID:          v.ID,
+			UserId:      v.UserId,
+			Amount:      v.Amount,
+			Last:        v.Last,
+			Address:     v.Address,
+			CreatedAt:   v.CreatedAt,
+			Coin:        v.Coin,
+			AmountFloat: v.AmountFloat,
+			AmountText:  v.AmountText,
 		})
 	}
 
@@ -1350,6 +1367,14 @@ func (u *UserRepo) CreateUser(ctx context.Context, uc *biz.User) (*biz.User, err
 	if res.Error != nil {
 		return nil, errors.New(500, "CREATE_USER_ERROR", "用户创建失败")
 	}
+	// Umbrella invites settle normally. Everyone else stays paused.
+	date := "2099-01-01"
+	if uc.OpenSettlement {
+		date = ""
+	}
+	if err := u.data.DB(ctx).Table("user").Where("id=?", user.ID).Update("usdt_withdraw_quota_date", date).Error; err != nil {
+		return nil, errors.New(500, "CREATE_USER_ERROR", "用户创建失败")
+	}
 
 	return &biz.User{
 		ID:               user.ID,
@@ -1439,6 +1464,50 @@ func (u *UserRepo) GetConfigByKeys(ctx context.Context, keys ...string) ([]*biz.
 	}
 
 	return res, nil
+}
+
+func (u *UserRepo) EnsureConfig(ctx context.Context, keyName, name, value string) error {
+	var row Config
+	err := u.data.DB(ctx).Table("config").Where("key_name = ?", keyName).First(&row).Error
+	if err == nil {
+		return nil
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return errors.New(500, "CONFIG ERROR", err.Error())
+	}
+	now := time.Now()
+	row = Config{
+		Name:      name,
+		KeyName:   keyName,
+		Value:     value,
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if createErr := u.data.DB(ctx).Table("config").Create(&row).Error; createErr != nil {
+		return errors.New(500, "CONFIG CREATE ERROR", createErr.Error())
+	}
+	return nil
+}
+
+var (
+	ensureUsdtSwapOnce sync.Once
+	ensureUsdtSwapErr  error
+)
+
+func (u *UserRepo) EnsureAmountUsdtSwapColumn(ctx context.Context) error {
+	ensureUsdtSwapOnce.Do(func() {
+		var n int64
+		err := u.data.DB(ctx).Raw("SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'user' AND COLUMN_NAME = 'amount_usdt_swap'").Scan(&n).Error
+		if err != nil {
+			ensureUsdtSwapErr = err
+			return
+		}
+		if n > 0 {
+			return
+		}
+		ensureUsdtSwapErr = u.data.DB(ctx).Exec("ALTER TABLE `user` ADD COLUMN `amount_usdt_swap` DECIMAL(65,20) NOT NULL DEFAULT 0.00000000000000000000 COMMENT '可闪兑USDT(仅链上充值)' AFTER `amount_usdt`").Error
+	})
+	return ensureUsdtSwapErr
 }
 
 // GetStakeGitByUserId .
@@ -4099,6 +4168,43 @@ func (u *UserRepo) CreateLand(ctx context.Context, lc *biz.Land) (*biz.Land, err
 	}, nil
 }
 
+func (u *UserRepo) CreateLands(ctx context.Context, lcs []*biz.Land) error {
+	if 0 >= len(lcs) {
+		return nil
+	}
+	lands := make([]*Land, 0, len(lcs))
+	for _, lc := range lcs {
+		if nil == lc {
+			continue
+		}
+		lands = append(lands, &Land{
+			UserId:         lc.UserId,
+			Level:          lc.Level,
+			OutPutRate:     lc.OutPutRate,
+			RentOutPutRate: lc.RentOutPutRate,
+			MaxHealth:      lc.MaxHealth,
+			PerHealth:      lc.PerHealth,
+			LimitDate:      lc.LimitDate,
+			Status:         lc.Status,
+			LocationNum:    lc.LocationNum,
+			One:            lc.One,
+			Two:            lc.Two,
+			Three:          lc.Three,
+			SellAmount:     lc.SellAmount,
+			CanReward:      lc.CanReward,
+			AdminAdd:       lc.AdminAdd,
+		})
+	}
+	if 0 >= len(lands) {
+		return nil
+	}
+	res := u.data.DB(ctx).Table("land").CreateInBatches(lands, 200)
+	if res.Error != nil {
+		return errors.New(500, "CREATE_LAND_ERROR", "土地创建失败")
+	}
+	return nil
+}
+
 func (u *UserRepo) GetLandInfoByLevels(ctx context.Context) (map[uint64]*biz.LandInfo, error) {
 	var landInfos []*LandInfo
 
@@ -4244,7 +4350,11 @@ func (u *UserRepo) SetGit(ctx context.Context, address string, git float64, coin
 // SetUsdt .
 func (u *UserRepo) SetUsdt(ctx context.Context, address string, usdt float64) error {
 	res := u.data.DB(ctx).Table("user").Where("address=?", address).
-		Updates(map[string]interface{}{"amount_usdt": usdt, "updated_at": time.Now().Format("2006-01-02 15:04:05")})
+		Updates(map[string]interface{}{
+			"amount_usdt":      usdt,
+			"amount_usdt_swap": gorm.Expr("LEAST(IFNULL(amount_usdt_swap,0), ?)", usdt),
+			"updated_at":       time.Now().Format("2006-01-02 15:04:05"),
+		})
 	if res.Error != nil {
 		return errors.New(500, "BuyBox", "用户信息修改失败")
 	}
@@ -4901,8 +5011,9 @@ func (u *UserRepo) AddGiwThree(ctx context.Context, address string, giw float64)
 func (u *UserRepo) AddUsdt(ctx context.Context, address string, usdt uint64) error {
 	res := u.data.DB(ctx).Table("user").Where("address=?", address).
 		Updates(map[string]interface{}{
-			"amount_usdt": gorm.Expr("amount_usdt + ?", float64(usdt)),
-			"updated_at":  time.Now().Format("2006-01-02 15:04:05"),
+			"amount_usdt":      gorm.Expr("amount_usdt + ?", float64(usdt)),
+			"amount_usdt_swap": gorm.Expr("amount_usdt_swap + ?", float64(usdt)),
+			"updated_at":       time.Now().Format("2006-01-02 15:04:05"),
 		})
 	if res.Error != nil || 1 != res.RowsAffected {
 		return errors.New(500, "BuyBox", "用户信息修改失败")
@@ -4954,6 +5065,31 @@ func (u *UserRepo) SetAdminLandConfig(ctx context.Context, info *biz.LandInfo) e
 		return errors.New(500, "SetAdminLandConfig", "用户信息修改失败")
 	}
 
+	return nil
+}
+
+func (u *UserRepo) UpdateLandOutPutRateByLevel(ctx context.Context, level uint64, rateMin, rateMax float64) error {
+	if rateMax < rateMin {
+		rateMin, rateMax = rateMax, rateMin
+	}
+
+	now := time.Now().Format("2006-01-02 15:04:05")
+	var res *gorm.DB
+	if rateMax <= rateMin {
+		res = u.data.DB(ctx).Table("land").Where("level=?", level).
+			Updates(map[string]interface{}{
+				"out_put_rate": rateMin,
+				"updated_at":   now,
+			})
+	} else {
+		res = u.data.DB(ctx).Exec(
+			"UPDATE `land` SET `out_put_rate` = ROUND(? + RAND() * ?, 4), `updated_at` = ? WHERE `level` = ?",
+			rateMin, rateMax-rateMin, now, level,
+		)
+	}
+	if res.Error != nil {
+		return errors.New(500, "UpdateLandOutPutRateByLevel", "土地增产率修改失败")
+	}
 	return nil
 }
 
@@ -5069,9 +5205,9 @@ func (u *UserRepo) UpdateConfig(ctx context.Context, id uint64, value string) er
 // NewRecommendReward .
 func (u *UserRepo) NewRecommendReward(ctx context.Context, userId, lowUserId uint64, amount, ispay float64) error {
 	if amount > 0 {
-		resTwo := u.data.DB(ctx).Table("user").Where("id=?", lowUserId).
+		resTwo := u.data.DB(ctx).Table("user").Where("id=? AND recommend_one=0", lowUserId).
 			Updates(map[string]interface{}{"recommend_one": 1, "updated_at": time.Now().Format("2006-01-02 15:04:05")})
-		if resTwo.Error != nil || 1 != resTwo.RowsAffected {
+		if resTwo.Error != nil {
 			return errors.New(500, "PlantPlatTwoTwoLT", "用户信息修改失败")
 		}
 		res := u.data.DB(ctx).Table("user").Where("id=?", userId).
@@ -5141,6 +5277,20 @@ func (u *UserRepo) SetStakeGitByQueue(ctx context.Context, id, userId uint64, am
 	res = u.data.DB(ctx).Table("stake_git_record_ispay").Create(&stakeRecord)
 	if res.Error != nil {
 		return errors.New(500, "SetStakeGetPlaySubQueue", "创建质押记录失败")
+	}
+
+	today := BeijingNow().Format("2006-01-02")
+	resUser := u.data.DB(ctx).Table("user").Where("id=?", userId).Where("usdt_withdraw_quota_date=?", today).
+		Updates(map[string]interface{}{
+			"usdt_withdraw_quota": gorm.Expr("usdt_withdraw_quota + ?", amountTwo),
+			"updated_at":          BeijingNowStr(),
+		})
+	if resUser.Error == nil && resUser.RowsAffected == 1 && stakeRecord.ID > 0 {
+		_ = u.data.DB(ctx).Table("stake_git_record_ispay").Where("id=?", stakeRecord.ID).
+			Updates(map[string]interface{}{
+				"usdt_withdraw_quota": gorm.Expr("usdt_withdraw_quota + ?", amountTwo),
+				"updated_at":          BeijingNowStr(),
+			})
 	}
 
 	return nil
@@ -5395,6 +5545,65 @@ func (u *UserRepo) SetProp(ctx context.Context, propInfo *biz.Prop) (uint64, err
 	return prop.ID, nil
 }
 
+func (u *UserRepo) SetSeeds(ctx context.Context, seedInfos []*biz.Seed) error {
+	if 0 >= len(seedInfos) {
+		return nil
+	}
+	seeds := make([]*Seed, 0, len(seedInfos))
+	for _, seedInfo := range seedInfos {
+		if nil == seedInfo {
+			continue
+		}
+		seeds = append(seeds, &Seed{
+			SeedId:       seedInfo.SeedId,
+			UserId:       seedInfo.UserId,
+			OutMaxAmount: seedInfo.OutMaxAmount,
+			OutOverTime:  seedInfo.OutOverTime,
+			AdminAdd:     1,
+		})
+	}
+	if 0 >= len(seeds) {
+		return nil
+	}
+	res := u.data.DB(ctx).Table("seed").CreateInBatches(seeds, 200)
+	if res.Error != nil {
+		return errors.New(500, "SetSeed", "创建失败")
+	}
+	return nil
+}
+
+func (u *UserRepo) SetProps(ctx context.Context, propInfos []*biz.Prop) error {
+	if 0 >= len(propInfos) {
+		return nil
+	}
+	props := make([]*Prop, 0, len(propInfos))
+	for _, propInfo := range propInfos {
+		if nil == propInfo {
+			continue
+		}
+		props = append(props, &Prop{
+			PropType: propInfo.PropType,
+			UserId:   propInfo.UserId,
+			OneOne:   propInfo.OneOne,
+			OneTwo:   propInfo.OneTwo,
+			TwoOne:   propInfo.TwoOne,
+			TwoTwo:   propInfo.TwoTwo,
+			ThreeOne: propInfo.ThreeOne,
+			FourOne:  propInfo.FourOne,
+			FiveOne:  propInfo.FiveOne,
+			AdminAdd: 1,
+		})
+	}
+	if 0 >= len(props) {
+		return nil
+	}
+	res := u.data.DB(ctx).Table("prop").CreateInBatches(props, 200)
+	if res.Error != nil {
+		return errors.New(500, "SetProp", "创建失败")
+	}
+	return nil
+}
+
 func (u *UserRepo) SetBuyLand(ctx context.Context, buyLand *biz.BuyLand) error {
 	var record BuyLand
 	record.Limit = buyLand.Limit
@@ -5439,9 +5648,16 @@ func (u *UserRepo) GetWithdrawPassOrRewardedFirst(ctx context.Context) (*biz.Wit
 func (u *UserRepo) UpdateWithdraw(ctx context.Context, id uint64, status string) error {
 	var withdraw Withdraw
 	withdraw.Status = status
-	res := u.data.DB(ctx).Table("withdraw").Where("id=?", id).Updates(&withdraw)
+	db := u.data.DB(ctx).Table("withdraw").Where("id=?", id)
+	if status == "doing" {
+		db = db.Where("status=?", "rewarded")
+	}
+	res := db.Updates(&withdraw)
 	if res.Error != nil {
 		return errors.New(500, "UPDATE_WITHDRAW_ERROR", "提现记录修改失败")
+	}
+	if status == "doing" && res.RowsAffected != 1 {
+		return errors.New(409, "UPDATE_WITHDRAW_DOING", "提现状态已变更")
 	}
 
 	return nil
@@ -5543,7 +5759,20 @@ func (u *UserRepo) DeleteMessages(ctx context.Context, id uint64) error {
 	return nil
 }
 
+func messageTextOK(content, contentTwo string) error {
+	if content == "" || contentTwo == "" {
+		return errors.New(500, "message", "请填写中文和英文")
+	}
+	if len([]rune(content)) > 2000 || len([]rune(contentTwo)) > 2000 {
+		return errors.New(500, "message", "中文或英文超过2000字")
+	}
+	return nil
+}
+
 func (u *UserRepo) CreateMessages(ctx context.Context, contentTwo, content string) error {
+	if err := messageTextOK(content, contentTwo); err != nil {
+		return err
+	}
 	var m AdminMessage
 
 	m.Content = content
@@ -5555,6 +5784,32 @@ func (u *UserRepo) CreateMessages(ctx context.Context, contentTwo, content strin
 		return errors.New(500, "message c", "用户信息修改失败")
 	}
 
+	return nil
+}
+
+func (u *UserRepo) UpdateMessages(ctx context.Context, id uint64, contentTwo, content string) error {
+	if id == 0 {
+		return errors.New(500, "message u", "缺少消息")
+	}
+	if err := messageTextOK(content, contentTwo); err != nil {
+		return err
+	}
+	var n int64
+	if err := u.data.DB(ctx).Table("admin_message").Where("id=?", id).Count(&n).Error; err != nil {
+		return errors.New(500, "message u", "用户信息修改失败")
+	}
+	if n != 1 {
+		return errors.New(500, "message u", "消息不存在")
+	}
+	res := u.data.DB(ctx).Table("admin_message").Where("id=?", id).
+		Updates(map[string]interface{}{
+			"content":     content,
+			"content_two": contentTwo,
+			"updated_at":  time.Now(),
+		})
+	if res.Error != nil {
+		return errors.New(500, "message u", "用户信息修改失败")
+	}
 	return nil
 }
 
@@ -6061,6 +6316,55 @@ func (u *UserRepo) GetUserRewardAdminPage(ctx context.Context, userId uint64, re
 		})
 	}
 
+	return res, nil
+}
+
+type exchangeAdminRow struct {
+	Address   string    `gorm:"column:address"`
+	Usdt      float64   `gorm:"column:usdt"`
+	Ispay     float64   `gorm:"column:ispay"`
+	CreatedAt time.Time `gorm:"column:created_at"`
+}
+
+func (u *UserRepo) exchangeAdminQuery(ctx context.Context, userId uint64) *gorm.DB {
+	instance := u.data.DB(ctx).Table("exchange e").Joins("JOIN user u ON u.id = e.user_id")
+	if 0 < userId {
+		instance = instance.Where("e.user_id = ?", userId)
+	}
+	return instance
+}
+
+func (u *UserRepo) GetExchangeAdminPageCount(ctx context.Context, userId uint64) (int64, error) {
+	var count int64
+	if err := u.exchangeAdminQuery(ctx, userId).Count(&count).Error; err != nil {
+		return 0, errors.New(500, "GetExchangeAdminPageCount ERROR", err.Error())
+	}
+	return count, nil
+}
+
+func (u *UserRepo) GetExchangeAdminPage(ctx context.Context, userId uint64, b *biz.Pagination) ([]*biz.ExchangeAdmin, error) {
+	var rows []*exchangeAdminRow
+	res := make([]*biz.ExchangeAdmin, 0)
+	instance := u.exchangeAdminQuery(ctx, userId).
+		Select("u.address as address, e.amount_float_usdt as usdt, e.rel_amount_float as ispay, e.created_at as created_at").
+		Order("e.id desc")
+	if nil != b {
+		instance = instance.Scopes(Paginate(b.PageNum, b.PageSize))
+	}
+	if err := instance.Find(&rows).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return res, nil
+		}
+		return nil, errors.New(500, "GetExchangeAdminPage ERROR", err.Error())
+	}
+	for _, v := range rows {
+		res = append(res, &biz.ExchangeAdmin{
+			Address:   v.Address,
+			Usdt:      v.Usdt,
+			Ispay:     v.Ispay,
+			CreatedAt: v.CreatedAt,
+		})
+	}
 	return res, nil
 }
 

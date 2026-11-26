@@ -21,6 +21,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -1677,7 +1678,50 @@ func (a *AppService) SetLand(ctx context.Context, req *pb.SetLandRequest) (*pb.S
 	return a.ac.SetLand(ctx, req)
 }
 
+const (
+	adminLoginWindow = 10 * time.Minute
+	adminLoginMax    = 5
+)
+
+var (
+	adminLoginMu   sync.Mutex
+	adminLoginHits = map[string][]time.Time{}
+)
+
+func allowAdminLogin(account string) bool {
+	if account == "" {
+		account = "-"
+	}
+	now := time.Now()
+	cutoff := now.Add(-adminLoginWindow)
+	adminLoginMu.Lock()
+	defer adminLoginMu.Unlock()
+	kept := make([]time.Time, 0, adminLoginMax)
+	for _, t := range adminLoginHits[account] {
+		if t.After(cutoff) {
+			kept = append(kept, t)
+		}
+	}
+	if len(kept) >= adminLoginMax {
+		adminLoginHits[account] = kept
+		return false
+	}
+	adminLoginHits[account] = append(kept, now)
+	return true
+}
+
 func (a *AppService) AdminLogin(ctx context.Context, req *pb.AdminLoginRequest) (*pb.AdminLoginReply, error) {
+	account := ""
+	if req != nil && req.SendBody != nil {
+		account = req.SendBody.Account
+	}
+	if !allowAdminLogin(account) {
+		return &pb.AdminLoginReply{
+			Token:  "",
+			Status: "尝试过多，请稍后再试",
+		}, nil
+	}
+
 	claims := auth.CustomClaims{
 		Address: "admin",
 		RegisteredClaims: jwt2.RegisteredClaims{
@@ -1889,6 +1933,10 @@ func (a *AppService) AdminSetBuyLand(ctx context.Context, req *pb.AdminSetBuyLan
 
 func (a *AppService) SetAdminMessages(ctx context.Context, req *pb.SetAdminMessagesRequest) (*pb.SetAdminMessagesReply, error) {
 	return a.ac.SetAdminMessages(ctx, req)
+}
+
+func (a *AppService) UpdateAdminMessages(ctx context.Context, id uint64, content, contentTwo string) (*pb.SetAdminMessagesReply, error) {
+	return a.ac.UpdateAdminMessages(ctx, id, contentTwo, content)
 }
 
 func (a *AppService) DeleteAdminMessages(ctx context.Context, req *pb.DeleteAdminMessagesRequest) (*pb.DeleteAdminMessagesReply, error) {
@@ -2194,7 +2242,17 @@ func getUserInfo(start int64, end int64, address string) ([]*userDeposit, error)
 	return users, nil
 }
 
+var (
+	depositIspayMu sync.Mutex
+	depositUsdtMu  sync.Mutex
+)
+
 func (a *AppService) AdminDeposit(ctx context.Context, req *pb.AdminDepositRequest) (*pb.AdminDepositReply, error) {
+	if !depositIspayMu.TryLock() {
+		return nil, nil
+	}
+	defer depositIspayMu.Unlock()
+
 	end := time.Now().UTC().Add(50 * time.Second)
 
 	for i := 1; i <= 10; i++ {
@@ -2294,6 +2352,11 @@ func (a *AppService) AdminDeposit(ctx context.Context, req *pb.AdminDepositReque
 
 // AdminDepositUsdt 目前唯一充值
 func (a *AppService) AdminDepositUsdt(ctx context.Context, req *pb.AdminDepositUsdtRequest) (*pb.AdminDepositUsdtReply, error) {
+	if !depositUsdtMu.TryLock() {
+		return nil, nil
+	}
+	defer depositUsdtMu.Unlock()
+
 	end := time.Now().UTC().Add(50 * time.Second)
 
 	for i := 1; i <= 10; i++ {
@@ -2316,7 +2379,7 @@ func (a *AppService) AdminDepositUsdt(ctx context.Context, req *pb.AdminDepositU
 			continue
 		}
 
-		userLength, err = getUserLength("0xD0c62c94F94c70E5f10169F59B0a5C3f84dAe800")
+		userLength, err = getUserLength("0xA5F7DF8FAA0333A34f22a3EFC8be436a26e95D0F")
 		if nil != err {
 			fmt.Println(err)
 		}
@@ -2333,7 +2396,7 @@ func (a *AppService) AdminDepositUsdt(ctx context.Context, req *pb.AdminDepositU
 			break
 		}
 
-		depositUsdtResult, err = getUserInfo(last, userLength-1, "0xD0c62c94F94c70E5f10169F59B0a5C3f84dAe800")
+		depositUsdtResult, err = getUserInfo(last, userLength-1, "0xA5F7DF8FAA0333A34f22a3EFC8be436a26e95D0F")
 		if nil != err {
 			break
 		}

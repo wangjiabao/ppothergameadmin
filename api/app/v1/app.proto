@@ -1499,6 +1499,7 @@ message AdminUserListReply { // 用户信息
 
 		uint64 canPlaySix = 124;
 		uint64 canSellProp = 126;
+		string createdAt = 127; // 注册时间，北京时间
 	}
 
 	int64 count = 3;

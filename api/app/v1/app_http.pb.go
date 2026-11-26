@@ -8,6 +8,9 @@ package v1
 
 import (
 	context "context"
+	"encoding/json"
+	"strconv"
+
 	http "github.com/go-kratos/kratos/v2/transport/http"
 	binding "github.com/go-kratos/kratos/v2/transport/http/binding"
 )
@@ -2282,17 +2285,59 @@ func _App_AdminSetBuyLand0_HTTP_Handler(srv AppHTTPServer) func(ctx http.Context
 	}
 }
 
+type adminMessageUpdater interface {
+	UpdateAdminMessages(context.Context, uint64, string, string) (*SetAdminMessagesReply, error)
+}
+
+// messageID accepts the list's id, which is sent back as either a JSON number or a string.
+type messageID uint64
+
+func (m *messageID) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "null" {
+		return nil
+	}
+	if b[0] == '"' {
+		var text string
+		if err := json.Unmarshal(b, &text); err != nil {
+			return err
+		}
+		if text == "" {
+			return nil
+		}
+		n, err := strconv.ParseUint(text, 10, 64)
+		if err != nil {
+			return err
+		}
+		*m = messageID(n)
+		return nil
+	}
+	n, err := strconv.ParseUint(string(b), 10, 64)
+	if err != nil {
+		return err
+	}
+	*m = messageID(n)
+	return nil
+}
+
 func _App_SetAdminMessages0_HTTP_Handler(srv AppHTTPServer) func(ctx http.Context) error {
 	return func(ctx http.Context) error {
-		var in SetAdminMessagesRequest
-		if err := ctx.Bind(&in.SendBody); err != nil {
+		var body struct {
+			Id         messageID `json:"id"`
+			Content    string    `json:"content"`
+			ContentTwo string    `json:"contentTwo"`
+		}
+		if err := ctx.Bind(&body); err != nil {
 			return err
 		}
-		if err := ctx.BindQuery(&in); err != nil {
-			return err
-		}
+		in := SetAdminMessagesRequest{SendBody: &SetAdminMessagesRequest_SendBody{
+			Content:    body.Content,
+			ContentTwo: body.ContentTwo,
+		}}
 		http.SetOperation(ctx, OperationAppSetAdminMessages)
 		h := ctx.Middleware(func(ctx context.Context, req interface{}) (interface{}, error) {
+			if body.Id > 0 {
+				return srv.(adminMessageUpdater).UpdateAdminMessages(ctx, uint64(body.Id), body.Content, body.ContentTwo)
+			}
 			return srv.SetAdminMessages(ctx, req.(*SetAdminMessagesRequest))
 		})
 		out, err := h(ctx, &in)

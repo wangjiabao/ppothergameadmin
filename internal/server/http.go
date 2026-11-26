@@ -57,10 +57,10 @@ func NewWhiteListMatcher() selector.MatchFunc {
 	whiteList["/api.app.v1.App/AdminWithdraw"] = struct{}{}
 	whiteList["/api.app.v1.App/AdminDaily"] = struct{}{}
 	//whiteList["/api.app.v1.App/AdminDailyReward"] = struct{}{}
-	whiteList["/api.app.v1.App/AdminSetGiw"] = struct{}{}
-	whiteList["/api.app.v1.App/AdminSetGiwTwo"] = struct{}{}
-	whiteList["/api.app.v1.App/AdminSetGit"] = struct{}{}
-	whiteList["/api.app.v1.App/AdminSetUsdt"] = struct{}{}
+	//whiteList["/api.app.v1.App/AdminSetGiw"] = struct{}{}
+	//whiteList["/api.app.v1.App/AdminSetGiwTwo"] = struct{}{}
+	//whiteList["/api.app.v1.App/AdminSetGit"] = struct{}{}
+	//whiteList["/api.app.v1.App/AdminSetUsdt"] = struct{}{}
 	whiteList["/api.app.v1.App/AdminLandReward"] = struct{}{}
 	whiteList["/api.app.v1.App/AdminSetQueue"] = struct{}{}
 	return func(ctx context.Context, operation string) bool {

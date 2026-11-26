@@ -4,13 +4,11 @@ import (
 	"context"
 	"crypto/md5"
 	"crypto/rand"
-	"encoding/json"
 	"fmt"
 	pb "game/api/app/v1"
 	"math"
 	"math/big"
 	rand2 "math/rand"
-	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -102,6 +100,7 @@ type User struct {
 	UpdatedAt        time.Time
 	RecommendOne     uint64
 	MyTotalAmountNew float64
+	OpenSettlement   bool
 }
 
 type BoxRecord struct {
@@ -150,6 +149,13 @@ type Reward struct {
 	Amount    float64
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+type ExchangeAdmin struct {
+	Address   string
+	Usdt      float64
+	Ispay     float64
+	CreatedAt time.Time
 }
 
 type Seed struct {
@@ -237,6 +243,17 @@ type LandInfo struct {
 	LimitDateMax      uint64
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
+}
+
+func randLandOutPutRate(min, max float64) float64 {
+	if max < min {
+		min, max = max, min
+	}
+	if max <= min {
+		return min
+	}
+	rng := rand2.New(rand2.NewSource(time.Now().UnixNano()))
+	return math.Round((min+rng.Float64()*(max-min))*10000) / 10000
 }
 
 type LandUserUse struct {
@@ -376,14 +393,16 @@ type Withdraw struct {
 }
 
 type EthRecord struct {
-	ID        uint64
-	UserId    uint64
-	Amount    uint64
-	Last      uint64
-	Address   string
-	Coin      string
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID          uint64
+	UserId      uint64
+	Amount      uint64
+	Last        uint64
+	Address     string
+	Coin        string
+	AmountFloat float64
+	AmountText  string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
 }
 
 type EthRecordTwo struct {
@@ -502,6 +521,8 @@ type UserRepo interface {
 	CreateStakeGit(ctx context.Context, sg *StakeGit) error
 	CreateUserRecommend(ctx context.Context, user *User, recommendUser *UserRecommend) (*UserRecommend, error)
 	GetConfigByKeys(ctx context.Context, keys ...string) ([]*Config, error)
+	EnsureConfig(ctx context.Context, keyName, name, value string) error
+	EnsureAmountUsdtSwapColumn(ctx context.Context) error
 	GetStakeGitByUserId(ctx context.Context, userId uint64) (*StakeGit, error)
 	GetBoxRecord(ctx context.Context, num uint64) ([]*BoxRecord, error)
 	GetBoxRecordCount(ctx context.Context, num uint64) (int64, error)
@@ -591,6 +612,7 @@ type UserRepo interface {
 	LandPush(ctx context.Context, landId uint64, userId, locationNum uint64) error
 	LandAddOutRate(ctx context.Context, id, landId, userId uint64) error
 	CreateLand(ctx context.Context, lc *Land) (*Land, error)
+	CreateLands(ctx context.Context, lcs []*Land) error
 	GetLand(ctx context.Context, id, id2, userId uint64) error
 	GetLandInfoByLevels(ctx context.Context) (map[uint64]*LandInfo, error)
 	GetLandInfo(ctx context.Context) ([]*LandInfo, error)
@@ -641,6 +663,7 @@ type UserRepo interface {
 	SetAdminPropConfig(ctx context.Context, info *PropInfo) error
 	SetAdminSeedConfig(ctx context.Context, info *SeedInfo) error
 	SetAdminLandConfig(ctx context.Context, info *LandInfo) error
+	UpdateLandOutPutRateByLevel(ctx context.Context, level uint64, rateMin, rateMax float64) error
 	UpdateConfig(ctx context.Context, id uint64, value string) error
 	CreatePriceChange(ctx context.Context, price, priceNew float64) error
 	GetPriceChange(ctx context.Context) ([]*PriceChange, error)
@@ -652,6 +675,8 @@ type UserRepo interface {
 	CreateNotice(ctx context.Context, userId uint64, content string, contentTwo string) error
 	SetSeed(ctx context.Context, seedInfo *Seed) (uint64, error)
 	SetProp(ctx context.Context, propInfo *Prop) (uint64, error)
+	SetSeeds(ctx context.Context, seedInfos []*Seed) error
+	SetProps(ctx context.Context, propInfos []*Prop) error
 	SetBuyLand(ctx context.Context, buyLand *BuyLand) error
 	GetWithdrawPassOrRewardedFirst(ctx context.Context) (*Withdraw, error)
 	UpdateWithdraw(ctx context.Context, id uint64, status string) error
@@ -667,9 +692,12 @@ type UserRepo interface {
 	GetUserRewardTwoPageCount(ctx context.Context, userId uint64, reason uint64) (int64, error)
 	GetUserRewardAdminPageCount(ctx context.Context, userId uint64, reason uint64) (int64, error)
 	GetUserRewardAdminPage(ctx context.Context, userId uint64, reason uint64, b *Pagination) ([]*Reward, error)
+	GetExchangeAdminPageCount(ctx context.Context, userId uint64) (int64, error)
+	GetExchangeAdminPage(ctx context.Context, userId uint64, b *Pagination) ([]*ExchangeAdmin, error)
 	GetUserRecommendLikeCode(ctx context.Context, code string) ([]*UserRecommend, error)
 	GetAdminMessages(ctx context.Context) ([]*AdminMessage, error)
 	CreateMessages(ctx context.Context, contentTwo, content string) error
+	UpdateMessages(ctx context.Context, id uint64, contentTwo, content string) error
 	DeleteMessages(ctx context.Context, id uint64) error
 	GetStakeGitRecordsByUserIDQueueToday(ctx context.Context) (float64, error)
 	GetStakeGitRecordsQueue(ctx context.Context) ([]*StakeGitRecordTwo, error)
@@ -688,7 +716,11 @@ type AppUsecase struct {
 
 // NewAppUsecase new a app usecase.
 func NewAppUsecase(userRepo UserRepo, tx Transaction, logger log.Logger) *AppUsecase {
-	return &AppUsecase{userRepo: userRepo, tx: tx, log: log.NewHelper(logger)}
+	uc := &AppUsecase{userRepo: userRepo, tx: tx, log: log.NewHelper(logger)}
+	if err := uc.userRepo.EnsureAmountUsdtSwapColumn(context.Background()); err != nil {
+		fmt.Println("ensure amount_usdt_swap", err)
+	}
+	return uc
 }
 
 func RandomBoolCrypto() (bool, error) {
@@ -697,6 +729,65 @@ func RandomBoolCrypto() (bool, error) {
 		return false, err
 	}
 	return n.Int64() < 5, nil
+}
+
+// formatNoticeAmount keeps at most 5 decimal places and drops trailing zeros.
+// Integers keep two places: 1 → 1.00, 0.10000 → 0.1, 16.619232565 → 16.61923.
+func formatNoticeAmount(v float64) string {
+	s := strconv.FormatFloat(v, 'f', 5, 64)
+	if strings.HasSuffix(s, ".00000") {
+		return s[:len(s)-3]
+	}
+	s = strings.TrimRight(s, "0")
+	return strings.TrimRight(s, ".")
+}
+
+// formatNoticeAmountFull shows the full amount without rounding to 5 places.
+// Trailing zeros are dropped; integers keep two places: 1 → 1.00, 0.02030 → 0.0203.
+func formatNoticeAmountFull(v float64) string {
+	s := strconv.FormatFloat(v, 'f', -1, 64)
+	if !strings.Contains(s, ".") {
+		return s + ".00"
+	}
+	s = strings.TrimRight(s, "0")
+	s = strings.TrimRight(s, ".")
+	if !strings.Contains(s, ".") {
+		return s + ".00"
+	}
+	return s
+}
+
+func noticeAddrTail(addr string) string {
+	addr = strings.TrimSpace(addr)
+	if len(addr) <= 6 {
+		if addr == "" {
+			return "未知"
+		}
+		return addr
+	}
+	return addr[len(addr)-6:]
+}
+
+func userInSettlementUmbrella(userID uint64, recommendCode string) bool {
+	switch userID {
+	case 61, 2162, 2194, 2273:
+		return true
+	}
+	wrapped := "D" + recommendCode + "D"
+	for _, id := range []string{"61", "2162", "2194", "2273"} {
+		if strings.Contains(wrapped, "D"+id+"D") {
+			return true
+		}
+	}
+	return false
+}
+
+func userIsOpenFive(userID uint64) bool {
+	switch userID {
+	case 271, 464, 629, 1748, 2090:
+		return true
+	}
+	return false
 }
 
 func (ac *AppUsecase) GetExistUserByAddressOrCreate(ctx context.Context, address string, req *pb.EthAuthorizeRequest) (*User, error, string) {
@@ -709,6 +800,7 @@ func (ac *AppUsecase) GetExistUserByAddressOrCreate(ctx context.Context, address
 	user, err = ac.userRepo.GetUserByAddress(ctx, address) // 查询用户
 	if nil == user || nil != err {
 		code := req.SendBody.Code
+		openSettlement := false
 		if "abf00dd52c08a9213f225827bc3fb100" != code {
 			if 1 >= len(code) {
 				return nil, errors.New(500, "USER_ERROR", "无效的推荐码1"), "无效的推荐码"
@@ -732,11 +824,15 @@ func (ac *AppUsecase) GetExistUserByAddressOrCreate(ctx context.Context, address
 			if nil == rURecommendUser || err != nil {
 				return nil, errors.New(500, "USER_ERROR", "无效的推荐码3"), "无效的推荐码3"
 			}
+			if userInSettlementUmbrella(rUser.ID, "") || userIsOpenFive(rUser.ID) || userInSettlementUmbrella(0, rURecommendUser.RecommendCode) {
+				openSettlement = true
+			}
 		}
 
 		if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
 			user, err = ac.userRepo.CreateUser(ctx, &User{
-				Address: address,
+				Address:        address,
+				OpenSettlement: openSettlement,
 			})
 			if err != nil {
 				return err
@@ -4604,18 +4700,7 @@ func (ac *AppUsecase) GetLand(ctx context.Context, address string, req *pb.GetLa
 			}, nil
 		}
 
-		rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
-		outMin := int64(landInfos[tmpLevel].OutPutRateMin)
-		outMax := int64(landInfos[tmpLevel].OutPutRateMax)
-
-		// 计算随机范围
-		tmpNum := outMax - outMin
-		if tmpNum <= 0 {
-			tmpNum = 1 // 避免 Int63n(0) panic
-		}
-
-		// 生成随机数
-		randomNumber := outMin + rngTmp.Int63n(tmpNum)
+		randomNumber := randLandOutPutRate(landInfos[tmpLevel].OutPutRateMin, landInfos[tmpLevel].OutPutRateMax)
 
 		if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
 			_, err = ac.userRepo.CreateLand(ctx, &Land{
@@ -4716,18 +4801,7 @@ func (ac *AppUsecase) GetLand(ctx context.Context, address string, req *pb.GetLa
 			}, nil
 		}
 
-		rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
-		outMin := int64(landInfos[tmpLevel].OutPutRateMin)
-		outMax := int64(landInfos[tmpLevel].OutPutRateMax)
-
-		// 计算随机范围
-		tmpNum := outMax - outMin
-		if tmpNum <= 0 {
-			tmpNum = 1 // 避免 Int63n(0) panic
-		}
-
-		// 生成随机数
-		randomNumber := outMin + rngTmp.Int63n(tmpNum)
+		randomNumber := randLandOutPutRate(landInfos[tmpLevel].OutPutRateMin, landInfos[tmpLevel].OutPutRateMax)
 
 		if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
 			err = ac.userRepo.GetLand(ctx, land.ID, land2.ID, user.ID)
@@ -5302,18 +5376,7 @@ func (ac *AppUsecase) SetLand(ctx context.Context, req *pb.SetLandRequest) (*pb.
 		}, nil
 	}
 
-	rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
-	outMin := int64(landInfos[tmpLevel].OutPutRateMin)
-	outMax := int64(landInfos[tmpLevel].OutPutRateMax)
-
-	// 计算随机范围
-	tmpNum := outMax - outMin
-	if tmpNum <= 0 {
-		tmpNum = 1 // 避免 Int63n(0) panic
-	}
-
-	// 生成随机数
-	randomNumber := outMin + rngTmp.Int63n(tmpNum)
+	randomNumber := randLandOutPutRate(landInfos[tmpLevel].OutPutRateMin, landInfos[tmpLevel].OutPutRateMax)
 
 	now := time.Now().Unix()
 	if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
@@ -5441,6 +5504,13 @@ func (ac *AppUsecase) AdminUserStakeList(ctx context.Context, req *pb.AdminUserS
 		StakeList: userRes,
 		Count:     count,
 	}, nil
+}
+
+func adminRegisterTime(created time.Time) string {
+	if created.IsZero() {
+		return ""
+	}
+	return created.In(time.FixedZone("CST", 8*3600)).Format("2006-01-02 15:04:05")
 }
 
 func (ac *AppUsecase) AdminUserList(ctx context.Context, req *pb.AdminUserListRequest) (*pb.AdminUserListReply, error) {
@@ -5636,6 +5706,7 @@ func (ac *AppUsecase) AdminUserList(ctx context.Context, req *pb.AdminUserListRe
 
 		useRes = append(useRes, &pb.AdminUserListReply_List{
 			UserId:                    v.ID,
+			CreatedAt:                 adminRegisterTime(v.CreatedAt),
 			Address:                   v.Address,
 			Level:                     uint64(tmpVip),
 			Giw:                       v.Giw,
@@ -5866,11 +5937,24 @@ func (ac *AppUsecase) AdminRecordList(ctx context.Context, req *pb.RecordListReq
 		}
 
 		for _, v := range list {
+			coin := v.Coin
+			text := strings.TrimSpace(v.AmountText)
+			if text != "" {
+				if strings.Contains(text, ".") {
+					text = strings.TrimRight(text, "0")
+					text = strings.TrimRight(text, ".")
+				}
+				if !strings.Contains(text, ".") {
+					text = text + ".00"
+				}
+				coin = v.Coin + "|" + text
+			}
 			res = append(res, &pb.RecordListReply_List{
 				Address:   v.Address,
 				CreatedAt: v.CreatedAt.Add(8 * time.Hour).Format("2006-01-02 15:04:05"),
 				Amount:    v.Amount,
-				Coin:      v.Coin,
+				AmountBiw: v.AmountFloat,
+				Coin:      coin,
 			})
 		}
 	} else {
@@ -5919,12 +6003,21 @@ func (ac *AppUsecase) AdminLandConfigSet(ctx context.Context, req *pb.AdminLandC
 		}, nil
 	}
 
-	err := ac.userRepo.SetAdminLandConfig(ctx, &LandInfo{
-		Level:         req.SendBody.Level,
-		OutPutRateMax: req.SendBody.OutPutRateMax,
-		OutPutRateMin: req.SendBody.OutPutRateMin,
-		MaxHealth:     req.SendBody.MaxHealth,
-		PerHealth:     req.SendBody.PerHealth,
+	err := ac.tx.ExecTx(ctx, func(ctx context.Context) error {
+		err := ac.userRepo.SetAdminLandConfig(ctx, &LandInfo{
+			Level:         req.SendBody.Level,
+			OutPutRateMax: req.SendBody.OutPutRateMax,
+			OutPutRateMin: req.SendBody.OutPutRateMin,
+			MaxHealth:     req.SendBody.MaxHealth,
+			PerHealth:     req.SendBody.PerHealth,
+		})
+		if nil != err {
+			return err
+		}
+		if 0 < req.SendBody.OutPutRateMin && 0 < req.SendBody.OutPutRateMax {
+			return ac.userRepo.UpdateLandOutPutRateByLevel(ctx, req.SendBody.Level, req.SendBody.OutPutRateMin, req.SendBody.OutPutRateMax)
+		}
+		return nil
 	})
 	if nil != err {
 		return &pb.AdminLandConfigSetReply{
@@ -6327,8 +6420,8 @@ func (ac *AppUsecase) AdminLandReward(ctx context.Context, req *pb.AdminLandRewa
 			err = ac.userRepo.CreateNotice(
 				ctx,
 				v.UserId,
-				"土地静态分红"+fmt.Sprintf("%.4f", rewardLand)+"ISPAY",
-				"land daily reward "+fmt.Sprintf("%.4f", rewardLand)+" ISPAY",
+				"恭喜您获得土地每日静态分红 "+fmt.Sprintf("%.4f", rewardLand)+" ISPAY",
+				"Congratulations, you received a daily land dividend of "+fmt.Sprintf("%.4f", rewardLand)+" ISPAY",
 			)
 			if nil != err {
 				return err
@@ -6349,6 +6442,22 @@ func (ac *AppUsecase) AdminGetConfig(ctx context.Context, req *pb.AdminGetConfig
 		configs []*Config
 		err     error
 	)
+
+	if err = ac.userRepo.EnsureConfig(ctx, "auto_harvest_hours", "成熟后自动收取等待小时", "24"); err != nil {
+		return &pb.AdminGetConfigReply{
+			Status: "配置错误",
+		}, nil
+	}
+	if err = ac.userRepo.EnsureConfig(ctx, "flash_swap_min_usdt", "闪兑最少起兑量(USDT)", "10"); err != nil {
+		return &pb.AdminGetConfigReply{
+			Status: "配置错误",
+		}, nil
+	}
+	if err = ac.userRepo.EnsureConfig(ctx, "flash_swap_on", "是否开启闪兑(1开0关)", "1"); err != nil {
+		return &pb.AdminGetConfigReply{
+			Status: "配置错误",
+		}, nil
+	}
 
 	// 配置
 	configs, err = ac.userRepo.GetConfigByKeys(ctx,
@@ -6454,6 +6563,9 @@ func (ac *AppUsecase) AdminGetConfig(ctx context.Context, req *pb.AdminGetConfig
 		"v_9",
 		"v_10",
 		"stake_rate_new",
+		"auto_harvest_hours",
+		"flash_swap_min_usdt",
+		"flash_swap_on",
 	)
 	if nil != err || nil == configs {
 		return &pb.AdminGetConfigReply{
@@ -8268,8 +8380,8 @@ func (ac *AppUsecase) AdminDaily(ctx context.Context, req *pb.AdminDailyRequest)
 				err = ac.userRepo.CreateNotice(
 					ctx,
 					v.ID,
-					"您在充值排名获得了"+fmt.Sprintf("%.5f", tmpReward)+"USDT",
-					"You've harvest "+fmt.Sprintf("%.5f", tmpReward)+" USDT from deposit rank",
+					"恭喜您获得充值排行奖励 "+fmt.Sprintf("%.5f", tmpReward)+" USDT",
+					"Congratulations, you received a deposit ranking reward of "+fmt.Sprintf("%.5f", tmpReward)+" USDT",
 				)
 				if nil != err {
 					return err
@@ -8284,6 +8396,71 @@ func (ac *AppUsecase) AdminDaily(ctx context.Context, req *pb.AdminDailyRequest)
 	}
 
 	return nil, nil
+}
+
+func (ac *AppUsecase) resolveAdminGrantUsers(ctx context.Context, raw string) ([]*User, string) {
+	parts := strings.Split(raw, "&")
+	addrs := make([]string, 0, len(parts))
+	seen := make(map[string]struct{})
+	for _, p := range parts {
+		addr := strings.TrimSpace(p)
+		if addr == "" {
+			continue
+		}
+		if _, ok := seen[addr]; ok {
+			continue
+		}
+		seen[addr] = struct{}{}
+		addrs = append(addrs, addr)
+	}
+	if 0 >= len(addrs) {
+		return nil, "地址为空"
+	}
+
+	var (
+		bad     []string
+		missing []string
+		users   = make([]*User, 0, len(addrs))
+	)
+	for _, addr := range addrs {
+		if 20 >= len(addr) || 100 <= len(addr) {
+			bad = append(bad, addr)
+			continue
+		}
+		user, err := ac.userRepo.GetUserByAddress(ctx, addr)
+		if nil != err || nil == user {
+			missing = append(missing, addr)
+			continue
+		}
+		users = append(users, user)
+	}
+	if 0 < len(bad) || 0 < len(missing) {
+		var b strings.Builder
+		if 0 < len(bad) {
+			b.WriteString("地址错误: ")
+			b.WriteString(strings.Join(bad, ", "))
+		}
+		if 0 < len(missing) {
+			if 0 < b.Len() {
+				b.WriteString("；")
+			}
+			b.WriteString("地址不存在用户: ")
+			b.WriteString(strings.Join(missing, ", "))
+		}
+		return nil, b.String()
+	}
+	return users, ""
+}
+
+func adminGrantTotal(n uint64) (uint64, string) {
+	total := uint64(1)
+	if 1 < n {
+		total = n
+	}
+	if 9999 < total {
+		return 0, "数量不能超过9999"
+	}
+	return total, ""
 }
 
 func (ac *AppUsecase) AdminSetLand(ctx context.Context, req *pb.AdminSetLandRequest) (*pb.AdminSetLandReply, error) {
@@ -8313,17 +8490,18 @@ func (ac *AppUsecase) AdminSetLand(ctx context.Context, req *pb.AdminSetLandRequ
 		}, nil
 	}
 
-	partsAddress := strings.Split(req.SendBody.Address, "&")
-
-	if 0 >= len(partsAddress) {
+	users, addrStatus := ac.resolveAdminGrantUsers(ctx, req.SendBody.Address)
+	if "" != addrStatus {
 		return &pb.AdminSetLandReply{
-			Status: "地址为空",
+			Status: addrStatus,
 		}, nil
 	}
 
-	total := uint64(1)
-	if 1 < req.SendBody.Total {
-		total = req.SendBody.Total
+	total, totalStatus := adminGrantTotal(req.SendBody.Total)
+	if "" != totalStatus {
+		return &pb.AdminSetLandReply{
+			Status: totalStatus,
+		}, nil
 	}
 
 	var (
@@ -8337,64 +8515,33 @@ func (ac *AppUsecase) AdminSetLand(ctx context.Context, req *pb.AdminSetLandRequ
 	//tmpThree, _ = strconv.ParseUint(req.SendBody.Three, 10, 64)
 	tmpFour, _ = strconv.ParseUint(req.SendBody.Four, 10, 64)
 
-	for _, v := range partsAddress {
-		if 20 >= len(v) {
-			continue
-		}
-
-		if 100 <= len(v) {
-			continue
-		}
-
-		var (
-			user *User
-		)
-
-		user, err = ac.userRepo.GetUserByAddress(ctx, v) // 查询用户
-		if nil != err || nil == user {
-			continue
-		}
-
+	now := time.Now().Unix()
+	lands := make([]*Land, 0, len(users)*int(total))
+	for _, user := range users {
 		for i := total; i > 0; i-- {
-			rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
-			outMin := int64(landInfos[tmpLevel].OutPutRateMin)
-			outMax := int64(landInfos[tmpLevel].OutPutRateMax)
-
-			// 计算随机范围
-			tmpNum := outMax - outMin
-			if tmpNum <= 0 {
-				tmpNum = 1 // 避免 Int63n(0) panic
-			}
-
-			// 生成随机数
-			randomNumber := outMin + rngTmp.Int63n(tmpNum)
-
-			now := time.Now().Unix()
-			if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
-				_, err = ac.userRepo.CreateLand(ctx, &Land{
-					UserId:     user.ID,
-					Level:      landInfos[tmpLevel].Level,
-					OutPutRate: float64(randomNumber),
-					MaxHealth:  landInfos[tmpLevel].MaxHealth,
-					PerHealth:  landInfos[tmpLevel].PerHealth,
-					LimitDate:  uint64(now) + req.SendBody.Limit,
-					Status:     0,
-					One:        tmpOne,
-					Two:        tmpTwo,
-					Three:      tmpThree,
-					CanReward:  tmpFour,
-					AdminAdd:   1,
-				})
-				if nil != err {
-					return err
-				}
-
-				return nil
-			}); nil != err {
-				fmt.Println(err, "setLand", user)
-				continue
-			}
+			randomNumber := randLandOutPutRate(landInfos[tmpLevel].OutPutRateMin, landInfos[tmpLevel].OutPutRateMax)
+			lands = append(lands, &Land{
+				UserId:     user.ID,
+				Level:      landInfos[tmpLevel].Level,
+				OutPutRate: float64(randomNumber),
+				MaxHealth:  landInfos[tmpLevel].MaxHealth,
+				PerHealth:  landInfos[tmpLevel].PerHealth,
+				LimitDate:  uint64(now) + req.SendBody.Limit,
+				Status:     0,
+				One:        tmpOne,
+				Two:        tmpTwo,
+				Three:      tmpThree,
+				CanReward:  tmpFour,
+				AdminAdd:   1,
+			})
 		}
+	}
+	if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error {
+		return ac.userRepo.CreateLands(ctx, lands)
+	}); nil != err {
+		return &pb.AdminSetLandReply{
+			Status: "发放失败",
+		}, nil
 	}
 
 	return &pb.AdminSetLandReply{
@@ -8434,73 +8581,49 @@ func (ac *AppUsecase) AdminSetProp(ctx context.Context, req *pb.AdminSetPropRequ
 		}
 	}
 
-	partsAddress := strings.Split(req.SendBody.Address, "&")
-
-	if 0 >= len(partsAddress) {
+	users, addrStatus := ac.resolveAdminGrantUsers(ctx, req.SendBody.Address)
+	if "" != addrStatus {
 		return &pb.AdminSetPropReply{
-			Status: "地址为空",
+			Status: addrStatus,
 		}, nil
 	}
 
-	total := uint64(1)
-	if 1 < req.SendBody.Total {
-		total = req.SendBody.Total
+	total, totalStatus := adminGrantTotal(req.SendBody.Total)
+	if "" != totalStatus {
+		return &pb.AdminSetPropReply{
+			Status: totalStatus,
+		}, nil
 	}
 
-	for _, v := range partsAddress {
-		if 20 >= len(v) {
-			continue
-		}
-
-		if 100 <= len(v) {
-			continue
-		}
-
-		var (
-			user *User
-		)
-
-		user, err = ac.userRepo.GetUserByAddress(ctx, v) // 查询用户
-		if nil != err || nil == user {
-			continue
-		}
-
+	props := make([]*Prop, 0, len(users)*int(total))
+	for _, user := range users {
 		for i := total; i > 0; i-- {
-			if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
-				if 17 == req.SendBody.PropType {
-					_, err = ac.userRepo.SetProp(ctx, &Prop{
-						UserId:   user.ID,
-						PropType: int(req.SendBody.PropType),
-					})
-					if nil != err {
-						return err
-					}
-				} else if 16 == req.SendBody.PropType {
-					return nil
-				} else {
-					_, err = ac.userRepo.SetProp(ctx, &Prop{
-						UserId:   user.ID,
-						PropType: int(req.SendBody.PropType),
-						OneOne:   int(propInfosMap[req.SendBody.PropType].OneOne),
-						OneTwo:   int(propInfosMap[req.SendBody.PropType].OneTwo),
-						TwoOne:   int(propInfosMap[req.SendBody.PropType].TwoOne),
-						TwoTwo:   propInfosMap[req.SendBody.PropType].TwoTwo,
-						ThreeOne: int(propInfosMap[req.SendBody.PropType].ThreeOne),
-						FourOne:  int(propInfosMap[req.SendBody.PropType].FourOne),
-						FiveOne:  int(propInfosMap[req.SendBody.PropType].FiveOne),
-					})
-					if nil != err {
-						return err
-					}
-				}
-
-				return nil
-			}); nil != err {
-				fmt.Println(err, "set prop", user)
+			if 17 == req.SendBody.PropType {
+				props = append(props, &Prop{
+					UserId:   user.ID,
+					PropType: int(req.SendBody.PropType),
+				})
 				continue
 			}
+			props = append(props, &Prop{
+				UserId:   user.ID,
+				PropType: int(req.SendBody.PropType),
+				OneOne:   int(propInfosMap[req.SendBody.PropType].OneOne),
+				OneTwo:   int(propInfosMap[req.SendBody.PropType].OneTwo),
+				TwoOne:   int(propInfosMap[req.SendBody.PropType].TwoOne),
+				TwoTwo:   propInfosMap[req.SendBody.PropType].TwoTwo,
+				ThreeOne: int(propInfosMap[req.SendBody.PropType].ThreeOne),
+				FourOne:  int(propInfosMap[req.SendBody.PropType].FourOne),
+				FiveOne:  int(propInfosMap[req.SendBody.PropType].FiveOne),
+			})
 		}
-
+	}
+	if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error {
+		return ac.userRepo.SetProps(ctx, props)
+	}); nil != err {
+		return &pb.AdminSetPropReply{
+			Status: "发放失败",
+		}, nil
 	}
 
 	return &pb.AdminSetPropReply{
@@ -8531,72 +8654,46 @@ func (ac *AppUsecase) AdminSetSeed(ctx context.Context, req *pb.AdminSetSeedRequ
 			Status: "不存在种子",
 		}, nil
 	}
-	partsAddress := strings.Split(req.SendBody.Address, "&")
-
-	if 0 >= len(partsAddress) {
+	users, addrStatus := ac.resolveAdminGrantUsers(ctx, req.SendBody.Address)
+	if "" != addrStatus {
 		return &pb.AdminSetSeedReply{
-			Status: "地址为空",
+			Status: addrStatus,
 		}, nil
 	}
 
-	total := uint64(1)
-	if 1 < req.SendBody.Total {
-		total = req.SendBody.Total
+	total, totalStatus := adminGrantTotal(req.SendBody.Total)
+	if "" != totalStatus {
+		return &pb.AdminSetSeedReply{
+			Status: totalStatus,
+		}, nil
 	}
 
-	for _, v := range partsAddress {
-		if 20 >= len(v) {
-			continue
-		}
-
-		if 100 <= len(v) {
-			continue
-		}
-
-		var (
-			user *User
-		)
-
-		user, err = ac.userRepo.GetUserByAddress(ctx, v) // 查询用户
-		if nil != err || nil == user {
-			continue
-		}
-
+	rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
+	outMin := int64(seedInfosMap[req.SendBody.SeedId].OutMinAmount)
+	outMax := int64(seedInfosMap[req.SendBody.SeedId].OutMaxAmount)
+	tmpNum := outMax - outMin
+	if tmpNum <= 0 {
+		tmpNum = 1
+	}
+	seeds := make([]*Seed, 0, len(users)*int(total))
+	for _, user := range users {
 		for i := total; i > 0; i-- {
-			rngTmp := rand2.New(rand2.NewSource(time.Now().UnixNano()))
-
-			outMin := int64(seedInfosMap[req.SendBody.SeedId].OutMinAmount)
-			outMax := int64(seedInfosMap[req.SendBody.SeedId].OutMaxAmount)
-
-			// 计算随机范围
-			tmpNum := outMax - outMin
-			if tmpNum <= 0 {
-				tmpNum = 1 // 避免 Int63n(0) panic
-			}
-
-			// 生成随机数
 			randomNumber := outMin + rngTmp.Int63n(tmpNum)
-
-			// 种子
-			if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error { // 事务
-				_, err = ac.userRepo.SetSeed(ctx, &Seed{
-					UserId:       user.ID,
-					SeedId:       req.SendBody.SeedId,
-					Name:         seedInfosMap[req.SendBody.SeedId].Name,
-					OutOverTime:  seedInfosMap[req.SendBody.SeedId].OutOverTime,
-					OutMaxAmount: float64(randomNumber),
-				})
-				if nil != err {
-					return err
-				}
-
-				return nil
-			}); nil != err {
-				fmt.Println(err, "set seed", user)
-				continue
-			}
+			seeds = append(seeds, &Seed{
+				UserId:       user.ID,
+				SeedId:       req.SendBody.SeedId,
+				Name:         seedInfosMap[req.SendBody.SeedId].Name,
+				OutOverTime:  seedInfosMap[req.SendBody.SeedId].OutOverTime,
+				OutMaxAmount: float64(randomNumber),
+			})
 		}
-
+	}
+	if err = ac.tx.ExecTx(ctx, func(ctx context.Context) error {
+		return ac.userRepo.SetSeeds(ctx, seeds)
+	}); nil != err {
+		return &pb.AdminSetSeedReply{
+			Status: "发放失败",
+		}, nil
 	}
 
 	return &pb.AdminSetSeedReply{
@@ -8604,8 +8701,22 @@ func (ac *AppUsecase) AdminSetSeed(ctx context.Context, req *pb.AdminSetSeedRequ
 	}, nil
 }
 
+func adminMessageStatus(err error) *pb.SetAdminMessagesReply {
+	if err == nil {
+		return &pb.SetAdminMessagesReply{Status: "ok"}
+	}
+	if se := errors.FromError(err); se != nil && se.Message != "" {
+		return &pb.SetAdminMessagesReply{Status: se.Message}
+	}
+	return &pb.SetAdminMessagesReply{Status: "保存失败"}
+}
+
 func (ac *AppUsecase) SetAdminMessages(ctx context.Context, req *pb.SetAdminMessagesRequest) (*pb.SetAdminMessagesReply, error) {
-	return &pb.SetAdminMessagesReply{Status: "ok"}, ac.userRepo.CreateMessages(ctx, req.SendBody.ContentTwo, req.SendBody.Content)
+	return adminMessageStatus(ac.userRepo.CreateMessages(ctx, req.SendBody.ContentTwo, req.SendBody.Content)), nil
+}
+
+func (ac *AppUsecase) UpdateAdminMessages(ctx context.Context, id uint64, contentTwo, content string) (*pb.SetAdminMessagesReply, error) {
+	return adminMessageStatus(ac.userRepo.UpdateMessages(ctx, id, contentTwo, content)), nil
 }
 
 func (ac *AppUsecase) DeleteAdminMessages(ctx context.Context, req *pb.DeleteAdminMessagesRequest) (*pb.DeleteAdminMessagesReply, error) {
@@ -9030,6 +9141,7 @@ func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountF
 		tmpRecommendUserIds = strings.Split(userRecommend.RecommendCode, "D")
 	}
 
+	depositCoin := "ISPAY"
 	reward := ethAmountUsdt * oneRate
 	var (
 		users    []*User
@@ -9063,7 +9175,7 @@ func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountF
 	}
 
 	totalTmp := len(tmpRecommendUserIds) - 1
-	if reward > 0 && 0 == user.RecommendOne {
+	if reward > 0 {
 		tmpI := 0
 		for i := len(tmpRecommendUserIds) - 1; i >= 0; i-- {
 			if 1 <= tmpI {
@@ -9101,8 +9213,8 @@ func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountF
 					err = ac.userRepo.CreateNotice(
 						ctx,
 						tmpUserId,
-						"您收获了"+fmt.Sprintf("%.2f", reward)+"USDT 和"+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
-						"You've harvest "+fmt.Sprintf("%.2f", reward)+" USDT AND "+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
+						"下级 "+noticeAddrTail(user.Address)+" 充值"+depositCoin+"，恭喜您获得直推奖 "+formatNoticeAmountFull(reward)+" USDT 和 "+formatNoticeAmountFull(ispayL)+" ISPAY",
+						"Downline "+noticeAddrTail(user.Address)+" deposited "+depositCoin+". Congratulations, you received a direct bonus of "+formatNoticeAmountFull(reward)+" USDT and "+formatNoticeAmountFull(ispayL)+" ISPAY",
 					)
 					if nil != err {
 						return err
@@ -9236,8 +9348,8 @@ func (ac *AppUsecase) DepositNewNew(ctx context.Context, eth *EthRecord, amountF
 				err = ac.userRepo.CreateNotice(
 					ctx,
 					uint64(tmpUserId),
-					"您在下级充值获得了"+fmt.Sprintf("%.5f", tmpReward)+"USDT 和 "+fmt.Sprintf("%.5f", ispayL)+"ISPAY",
-					"You've harvest "+fmt.Sprintf("%.5f", tmpReward)+" USDT and "+fmt.Sprintf("%.5f", ispayL)+"ISPAY from team deposit",
+					"下级 "+noticeAddrTail(user.Address)+" 充值"+depositCoin+"，恭喜您获得级差奖 "+formatNoticeAmountFull(tmpReward)+" USDT 和 "+formatNoticeAmountFull(ispayL)+" ISPAY",
+					"Downline "+noticeAddrTail(user.Address)+" deposited "+depositCoin+". Congratulations, you received a level-diff bonus of "+formatNoticeAmountFull(tmpReward)+" USDT and "+formatNoticeAmountFull(ispayL)+" ISPAY",
 				)
 				if nil != err {
 					return err
@@ -9256,56 +9368,6 @@ type SymbolThumb struct {
 	Symbol  string  `json:"symbol"`
 	Close   float64 `json:"close"`
 	UsdRate float64 `json:"usdRate"`
-}
-
-// GetIspayPrice 获取 ISPAY 当前 U 价格
-func GetIspayPrice() (float64, error) {
-	url := "https://ex.ispay.vip/market/symbol-thumb"
-
-	client := &http.Client{
-		Timeout: 10 * time.Second,
-	}
-
-	req, err := http.NewRequest(http.MethodGet, url, nil)
-	if err != nil {
-		return 0, err
-	}
-
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("request failed, status: %d", resp.StatusCode)
-	}
-
-	var list []SymbolThumb
-	if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-		return 0, err
-	}
-
-	for _, item := range list {
-		if strings.EqualFold(item.Symbol, "ISPAY/USDT") {
-			// 优先返回 usdRate，它表示折合 U / USD 的价格
-			if item.UsdRate > 0 {
-				return item.UsdRate, nil
-			}
-
-			// 兜底返回 close
-			if item.Close > 0 {
-				return item.Close, nil
-			}
-
-			return 0, fmt.Errorf("ISPAY/USDT price is zero")
-		}
-	}
-
-	return 0, fmt.Errorf("ISPAY/USDT not found")
 }
 
 func GetReservers() (float64, float64, error) {
@@ -9551,6 +9613,7 @@ func (ac *AppUsecase) DepositNewTwo(ctx context.Context, eth *EthRecord) error {
 		tmpRecommendUserIds = strings.Split(userRecommend.RecommendCode, "D")
 	}
 
+	depositCoin := "USDT"
 	reward := float64(eth.Amount) * oneRate
 	var (
 		users    []*User
@@ -9591,7 +9654,7 @@ func (ac *AppUsecase) DepositNewTwo(ctx context.Context, eth *EthRecord) error {
 	}
 
 	totalTmp := len(tmpRecommendUserIds) - 1
-	if reward > 0 && 0 == user.RecommendOne {
+	if reward > 0 {
 		tmpI := 0
 		for i := len(tmpRecommendUserIds) - 1; i >= 0; i-- {
 			if 1 <= tmpI {
@@ -9629,8 +9692,8 @@ func (ac *AppUsecase) DepositNewTwo(ctx context.Context, eth *EthRecord) error {
 					err = ac.userRepo.CreateNotice(
 						ctx,
 						tmpUserId,
-						"您收获了"+fmt.Sprintf("%.2f", reward)+"USDT 和"+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
-						"You've harvest "+fmt.Sprintf("%.2f", reward)+" USDT AND "+fmt.Sprintf("%.2f", ispayL)+" ISPAY",
+						"下级 "+noticeAddrTail(user.Address)+" 充值"+depositCoin+"，恭喜您获得直推奖 "+formatNoticeAmountFull(reward)+" USDT 和 "+formatNoticeAmountFull(ispayL)+" ISPAY",
+						"Downline "+noticeAddrTail(user.Address)+" deposited "+depositCoin+". Congratulations, you received a direct bonus of "+formatNoticeAmountFull(reward)+" USDT and "+formatNoticeAmountFull(ispayL)+" ISPAY",
 					)
 					if nil != err {
 						return err
@@ -9764,8 +9827,8 @@ func (ac *AppUsecase) DepositNewTwo(ctx context.Context, eth *EthRecord) error {
 				err = ac.userRepo.CreateNotice(
 					ctx,
 					uint64(tmpUserId),
-					"您在下级充值获得了"+fmt.Sprintf("%.5f", tmpReward)+"USDT 和 "+fmt.Sprintf("%.5f", ispayL)+"ISPAY",
-					"You've harvest "+fmt.Sprintf("%.5f", tmpReward)+" USDT and "+fmt.Sprintf("%.5f", ispayL)+"ISPAY from team deposit",
+					"下级 "+noticeAddrTail(user.Address)+" 充值"+depositCoin+"，恭喜您获得级差奖 "+formatNoticeAmountFull(tmpReward)+" USDT 和 "+formatNoticeAmountFull(ispayL)+" ISPAY",
+					"Downline "+noticeAddrTail(user.Address)+" deposited "+depositCoin+". Congratulations, you received a level-diff bonus of "+formatNoticeAmountFull(tmpReward)+" USDT and "+formatNoticeAmountFull(ispayL)+" ISPAY",
 				)
 				if nil != err {
 					return err
@@ -10059,6 +10122,10 @@ func (ac *AppUsecase) AdminRewardList(ctx context.Context, req *pb.AdminRewardLi
 		userId = user.ID
 	}
 
+	if adminFlashSwapRewardType == req.RewardType {
+		return ac.adminFlashSwapList(ctx, userId, req.Page)
+	}
+
 	var (
 		reward []*Reward
 	)
@@ -10124,6 +10191,49 @@ func (ac *AppUsecase) AdminRewardList(ctx context.Context, req *pb.AdminRewardLi
 			AmountTwo:   v.Three,
 			Address:     address,
 			RewardType:  v.Reason,
+			CreatedAt:   v.CreatedAt.Add(8 * time.Hour).Format("2006-01-02 15:04:05"),
+		})
+	}
+
+	return &pb.AdminRewardListReply{
+		Status: "ok",
+		Count:  uint64(count),
+		List:   res,
+	}, nil
+}
+
+const adminFlashSwapRewardType = uint64(60)
+
+func (ac *AppUsecase) adminFlashSwapList(ctx context.Context, userId, page uint64) (*pb.AdminRewardListReply, error) {
+	count, err := ac.userRepo.GetExchangeAdminPageCount(ctx, userId)
+	if nil != err {
+		return &pb.AdminRewardListReply{
+			Status: "不存在数据L，count",
+		}, nil
+	}
+
+	rows, err := ac.userRepo.GetExchangeAdminPage(ctx, userId, &Pagination{
+		PageNum:  int(page),
+		PageSize: 20,
+	})
+	if nil != err {
+		return &pb.AdminRewardListReply{
+			Status: "不存在数据L",
+		}, nil
+	}
+
+	res := make([]*pb.AdminRewardListReply_List, 0, len(rows))
+	for _, v := range rows {
+		price := ""
+		if v.Ispay > 0 {
+			price = strconv.FormatFloat(v.Usdt/v.Ispay, 'f', 6, 64)
+		}
+		res = append(res, &pb.AdminRewardListReply_List{
+			UserAddress: v.Address,
+			Amount:      v.Usdt,
+			AmountTwo:   v.Ispay,
+			Address:     price,
+			RewardType:  adminFlashSwapRewardType,
 			CreatedAt:   v.CreatedAt.Add(8 * time.Hour).Format("2006-01-02 15:04:05"),
 		})
 	}
